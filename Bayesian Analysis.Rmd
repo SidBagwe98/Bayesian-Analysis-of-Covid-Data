@@ -1,0 +1,368 @@
+---
+title: "Bayesian Analysis of Covid Data"
+author: "Siddhesh Bagwe"
+date: "2023-03-09"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(bayesplot)
+library(rstan)
+```
+```{r,warning=FALSE}
+ireland <- read.csv("./ireland1.txt")
+cases <- ireland[1:100,1]
+days = 1:100
+plot(days, cases, xlab="Days in", ylab="Number of daily cases", main="Irish daily covid case numbers")
+
+```
+
+The plot shows the cases over the days. We see that the number of cases kept on increasing with the days. After about the 50-60 day the number of cases started dropping. We will a Bayesian model for the same to predict the number of  cases.
+
+```{r,results='hide'}
+set.seed(123)
+library(rstan)
+write("
+data {
+  int<lower=1> N;
+  int y[N];
+  vector[N] t;
+}
+
+parameters {
+  real<lower=0> theta1; 
+  real<lower=0,upper=100> theta2;
+  real<lower=0,upper=1> theta3;
+}
+
+model {
+    target += normal_lpdf(theta1 | 1e3,1e5);
+    target += normal_lpdf(theta2| 50, 100);
+    for (n in 1:N){
+    target += poisson_lpmf(y[n] | theta1 * theta3 * exp(-theta3 * (t[n] - theta2)) / pow(1 + exp(-theta3 * (t[n] - theta2)), 2));
+    }
+}
+
+generated quantities {
+  vector[N] y_pred;
+  real log_lik[N];
+  for (n in 1:N){
+    y_pred[n] = poisson_rng( theta1 * theta3 * exp(-theta3 * (t[n] - theta2)) / pow(1 + exp(-theta3 * (t[n] - theta2)), 2.0) );
+    log_lik[n]=poisson_lpmf(y[n] | theta1 * theta3 * exp(-theta3 * (t[n] - theta2)) / pow(1 + exp(-theta3 * (t[n] - theta2)), 2));
+}
+}"
+,"m1.stan")
+
+```
+
+## Model Description
+
+The above model is defined for the logistic function
+          
+          yt - Po(lambdal(t))
+          
+- theta1, theta2  are normally distributed while theta 3 is uniformly distributed. 
+- We will use the y_pred generated to get the prediction from the model. The same can be used to get the accuracy of the model.
+- The log_lik function is defined to compare the accuracy of the model.
+
+```{r,results='hide',warning=FALSE}
+set.seed(123)
+data <- list(N = NROW(cases),
+            y = cases,
+            t = days)
+
+fit <- stan(file="m1.stan", data = data, iter=500)
+
+```
+- The model is fit for 500 iterations using the given data.
+- Here t is the number of days and y is number of cases.
+
+```{r,warning=FALSE}
+print(fit, pars=c("theta1", "theta2", "theta3","y_pred[1]"))
+
+```
+
+## Model Summary
+
+Here we see the summary of our model. 
+- The model is fit with 4 chains each with 500 iterations. Out of this 250 are used as warm-up. Thus we get 250 post-warm up draws per chain giving a total of 1000 post-warm up draws.
+- The parameters theta1, theta2 and theta3 define the function in our model. We see the mean,Standard error, standard deviation as well as the quantiles for our parameters. These parameters are then used to get the prediction from the model. As the data is of 100 days, we have the y_pred from 1 to 100. Here we see the mean, standard deviation as well as the quantiles for prediction of day 1(y_pred[1]).
+- n_eff is the effective sample_size. A sample size of greater than 10% of the total post-warm draws is acceptable (100 for this model.). The summary shows that all the parameters have an acceptable n_eff.
+- R_hat is the measure of convergence of the chains. The acceptable value of Rhat is less than or equal to 1.1. As all the parameters have Rhat less than 1.1 the model is acceptable.
+
+
+```{r,warning=FALSE}
+y_pred <- as.matrix(fit, pars=c("y_pred"))
+y_phdi = HDInterval::hdi(y_pred, credMass=0.90)
+pi_l = y_phdi[1,]
+pi_u = y_phdi[2,]
+print(y_phdi)
+```
+
+
+We can see the 90% posterior interval of our model. We will use this to check the accuracy of our model.
+
+```{r,warning=FALSE}
+d1 <- as.data.frame(data)
+library(ggplot2)
+p <- ggplot() 
+ 
+p2 <- p +
+  geom_point(data = d1,
+      aes(t, y), shape = 1, color = 'dodgerblue') +
+  ggtitle("Prediction Interval = 0.90")+ 
+  geom_ribbon(data = d1,
+      mapping = aes(t,ymin=pi_l, ymax=pi_u), alpha = .05,color = 'red')+xlab("Days")+ ylab("Cases")
+
+p2
+```
+
+The plot shows the ribbon of the 90% interval of our predicted data and the plot of the original data. We can see that though our model does a decent job in predicting the curve, the real values do not lie in the 90% interval for most of our data. This indicates that the model may not be a perfect fit for our data. We will check this further using the density plot of our original data to that of the posterior prediction.
+
+```{r,warning=FALSE}
+library(bayesplot)
+ppc_dens_overlay(d1$y, y_pred[1:100,])+ theme_classic()
+```
+
+Again we can see that, though the curve is similar there is quite a difference between the original and predicted values. This indicates that the model may not be a great fit.
+
+Next we will try to use our model to make the predication for number of cases for the next five days.
+ 
+```{r}
+set.seed(123)
+library(rstan)
+write("
+data {
+  int<lower=1> N;
+  int<lower=1> N1;
+  int y[N];
+  vector[N] t;
+  vector[N1] t_new;
+}
+
+parameters {
+  real<lower=0> theta1; 
+  real<lower=0,upper=100> theta2;
+  real<lower=0,upper=1> theta3;
+}
+
+model {
+    target += normal_lpdf(theta1 | 1e3,1e5);
+    target += normal_lpdf(theta2| 50, 100);
+    for (n in 1:N){
+    target += poisson_lpmf(y[n] | theta1 * theta3 * exp(-theta3 * (t[n] - theta2)) / pow(1 + exp(-theta3 * (t[n] - theta2)), 2));
+    }
+}
+
+generated quantities {
+  vector[N1] y_pred;
+  for (n in 1:N1){
+    y_pred[n] = poisson_rng( theta1 * theta3 * exp(-theta3 * (t_new[n] - theta2)) / pow(1 + exp(-theta3 * (t_new[n] - theta2)), 2.0) );
+}
+}"
+,"m2.stan")
+
+```
+
+Here the model is updated to predict values for t_new which is for days 101-105. We have to define the new data to fit our model.
+
+```{r,results='hide'}
+set.seed(123)
+t_new <- c(101,102,103,104,105)
+data1 <- list(N = NROW(cases),
+            N1 = as.integer(5),
+            y = cases,
+            t = days,
+            t_new=t_new)
+
+fit1 <- stan(file="m2.stan", data = data1, iter=500)
+
+```
+- The model is fit again with new data
+- Here along with the days and cases, we also give the data t_new to get the prediction.
+
+
+```{r}
+y_pred1 <- extract(fit1)$y_pred
+cases_pred <- as.integer(c(mean(y_pred1[,1]),mean(y_pred1[,2]),mean(y_pred1[,3]),mean(y_pred1[,4]),mean(y_pred1[,5])))
+print(cases_pred) 
+```
+
+Our model has predicted the number of cases for the next five days would be 10, 9, 8, 8, 7 respectively. Although the prediction may not be accurate, it can still give us a rough idea of the number of cases that can be found over the next five days.
+
+
+
+Again we will create our model to predict the number of cases but this time we will use the g(t) function. The g(t) function is given as
+
+          g(t) = theta1 exp(-theta2*theta3^t)
+
+For our model we need the value of lambda_g(t) which is the derivative of g(t) w.r.t t.
+
+Taking derivative we get lamda_g(t) as 
+
+          lamda_g(t)= theta1 * -theta2 * theta3^t * exp(-theta2 * theta3^t) * log(theta3)
+          
+We will use this function to build our model
+
+```{r, results='hide',warning=FALSE}
+set.seed(123)
+library(rstan)
+write("
+data {
+  int<lower=1> N;
+  int y[N];
+  vector[N] t;
+}
+
+parameters {
+  real<lower=0> theta1; 
+  real<lower=0,upper=100> theta2;
+  real<lower=0,upper=1> theta3;
+}
+
+model {
+    target += normal_lpdf(theta1 | 1e3,1e5);
+    target += normal_lpdf(theta2| 50, 100);
+    for (n in 1:N){
+    target += poisson_lpmf(y[n] | theta1 * (-theta2) * pow(theta3,t[n]) * exp(-theta2 * pow(theta3,t[n])) * log(theta3));
+    }
+}
+
+generated quantities {
+  vector[N] y_pred;
+  real log_lik[N];
+  for (n in 1:N){
+    y_pred[n] = poisson_rng( theta1 * (-theta2) * pow(theta3,t[n]) * exp(-theta2 * pow(theta3,t[n])) * log(theta3));
+    log_lik[n] = poisson_lpmf(y[n] | theta1 * (-theta2) * pow(theta3,t[n]) * exp(-theta2 * pow(theta3,t[n])) * log(theta3));
+}
+}"
+,"m3.stan")
+
+
+fit2<- stan(file="m3.stan", data = data, iter=500)
+```
+
+Our model is trained for 500 iterations using the same data as for part 1.
+
+```{r,warning=FALSE}
+print(fit2, pars=c("theta1", "theta2", "theta3","y_pred[1]"))
+
+```
+-The model summary can be seen using the print function. We get the mean, sd and the quantiles for the parameters theta1, theta2, theta3 as well as the predictions.We have shown the data for the prediction of first day. 
+- The noticeable difference is the summary of y_pred[1] of both the models. In this model we get that the lower and upper levels for y_pred[1] is 0 to 1 with a mean of 0.03 and sd of 0.17.
+- The n_eff and Rhat values are acceptable for this model as well.
+
+```{r,warning=FALSE}
+y_pred2 <- as.matrix(fit2, pars=c("y_pred"))
+y_phdi1 = HDInterval::hdi(y_pred2, credMass=0.90)
+pi_l1 = y_phdi1[1,]
+pi_u1 = y_phdi1[2,]
+print(y_phdi1)
+```
+
+The 90% credible intervals shows that the model predicts the cases to fall between this range. We can clearly see the difference between this model and the model in part1. Plotting the credible intervals with the original data will give us an idea of the accuracy of our model.
+
+```{r,warning=FALSE}
+p3 <- p +
+  geom_point(data = d1,
+      aes(t, y), shape = 1, color = 'dodgerblue') +
+  ggtitle("Prediction Interval = 0.90")+ 
+  geom_ribbon(data = d1,
+      mapping = aes(t, ymin=pi_l1, ymax=pi_u1), alpha = .05,color = 'red')+xlab("Days")+ ylab("Cases")
+
+p3
+```
+From the plot we can again see that the model doesn't do a great job in predicting the values. Although the values are predicted accurately at the start and to the end but there is a lot of inconsistency in the centre.
+
+```{r}
+library(bayesplot)
+ppc_dens_overlay(d1$y, y_pred2[1:100,])+ theme_classic()
+
+```
+Through bayesplot, we can see the density curve of the original data as compared to our prediction. 
+
+```{r, results='hide',warning=FALSE}
+set.seed(123)
+library(rstan)
+write("
+data {
+  int<lower=1> N;
+  int<lower=1> N1;
+  int y[N];
+  vector[N] t;
+  vector[N1] t_new;
+}
+
+parameters {
+  real<lower=0> theta1; 
+  real<lower=0,upper=100> theta2;
+  real<lower=0,upper=1> theta3;
+}
+
+model {
+    target += normal_lpdf(theta1 | 1e3,1e5);
+    target += normal_lpdf(theta2| 50, 100);
+    for (n in 1:N){
+    target += poisson_lpmf(y[n] | theta1 * (-theta2) * pow(theta3,t[n]) * exp(-theta2 * pow(theta3,t[n])) * log(theta3));
+    }
+}
+
+generated quantities {
+  vector[N1] y_pred;
+  for (n in 1:N1){
+    y_pred[n] = poisson_rng( theta1 * (-theta2) * pow(theta3,t_new[n]) * exp(-theta2 * pow(theta3,t_new[n])) * log(theta3) );
+  }
+}"
+,"m4.stan")
+
+fit3 <- stan(file="m4.stan", data = data1, iter=500)
+```
+```{r,warning=FALSE}
+y_pred3 <- extract(fit3)$y_pred
+cases_pred1 <- as.integer(c(mean(y_pred3[,1]),mean(y_pred3[,2]),mean(y_pred3[,3]),mean(y_pred3[,4]),mean(y_pred3[,5])))
+print(cases_pred1)
+```
+
+We see that the prediction from the model for the days 101-105 is 27, 25, 24, 22, 21 respectively. As the model gives 500 iterations, we use the mean of 500 values to get the prediction.
+
+
+## Model Comparison using Loo package
+
+```{r,warning=FALSE}
+library(loo)
+loo1 <- loo(fit)
+loo2 <- loo(fit2)
+loo_compare(loo1,loo2)
+```
+From the values of loo_compare we see that the accuracy of model 2(Gompertz) is better than that of the logistic function. So model 2 is preferred over model 1. The standard error difference too is pretty high, indicating that there is a big difference between the two. We will use the WAIC function to get more information.
+
+## Model Comparison using WAIC function
+
+```{r,warning=FALSE}
+log_lik1 <- loo::extract_log_lik(fit)
+waic1 <- loo::waic(log_lik1)
+log_lik2 <- loo::extract_log_lik(fit2)
+waic2 <- loo::waic(log_lik2)
+loo_compare(waic(log_lik1), waic(log_lik2))
+```
+
+The WAIC function also suggests that model 2 is better than model 1.The standard in this case is also high. 
+
+Although model 2 is better than model 1, both the models are notable to predict the data as accurately as desired. We can improve the model fit by the following techniques
+
+## Methods to improve model fit
+
+1. We can adjust the model parameters (theta1, theta2, theta3) to improve the fit.
+2. We can add more data to improve the model. More data helps the model to learn the trend better so as to better estimate the values.
+3. We can try different models and check whether a different model can be a better fit.
+4. Regularization techniques can help to prevent overfitting of the data by adding a penalty term to the model, which can improve the fit.
+
+## Conclusion
+
+Overall we see that the Gompretz model is a better model for our data but it can be eventually be improved.
